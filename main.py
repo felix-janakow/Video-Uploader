@@ -43,14 +43,28 @@ class VideoUploader:
         ]
         missing_vars = [name for name, val in required_vars if val is None]
         if missing_vars:
-            print("Missing required environment variables")
+            print("Missing required environment variables:")
             for var in missing_vars:
                 print(f"Set {var} before running again")
 
+def find_video_files(self, directory):
+    video_types = [".mp4", ".mov", ".MP4", ".MOV"]
+    video_files = []
+
+    directory = Path(directory)
+    print("Looking for video files in", directory)
+
+    for video in directory.rglob("*"):
+        if video.suffix in video_types and video.is_file():
+            video_files.append(video)
+    
+    print(f"Found {len(video_files)} video files")
+    return video_files
 
 def main():
     print("Starting Video Uploader ... 🔄")
     uploader = VideoUploader()
+    find_video_files(uploader, directory=Path(__file__).parent)
     
              
 if __name__ == "__main__":
