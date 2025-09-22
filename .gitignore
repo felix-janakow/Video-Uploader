@@ -1,0 +1,46 @@
+# =====================================
+# General .gitignore
+# =====================================
+
+.env
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
+*.out
+*.err
+
+# Editor / IDE settings
+.vscode/
+.idea/
+*.swp
+*.swo
+*.bak
+*.tmp
+
+# Python 
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+
+
+# =====================================
+# Optional: local overrides
+# =====================================
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# =====================================
+# Specific folders
+# =====================================
+
+Video-Uploader-env/
+ibm-aspera-transfer-sdk-macos-arm64-1.1.6/
