@@ -58,8 +58,7 @@ def find_video_files(self, directory):
     for video in directory.rglob("*"):
         if video.suffix in video_types and video.is_file():
             video_files.append(str(video))
-    
-    print(f"Found {len(video_files)} video files")
+        
     return video_files
 
 def create_transfer_spec(self, filepaths):
@@ -87,18 +86,98 @@ def create_transfer_spec(self, filepaths):
             "paths": paths,
         },
     }
+
+    
     return json.dumps(trasfer_spec, indent=2)
 
 
+def show_transfer_spec(self, filepaths):
+    spec = create_transfer_spec(self, filepaths)
+    print("ℹ️ Transfer specification created: ")
+    print(spec)
+
+def  connect(self):
+    try:
+        self.client = transfer_manager_grpc.TransferServiceStub(grpc.insecure_channel(self.transfer_manager))
+        print("✅ Connected to transfer manager")
+    except Exception as e:
+        print(f"❌ Could not connect to transfer manager: {e}")
+        sys.exit(1)
+
+
+def upload_videos(self, file_path, dry_run=False):
+    print(f"Total of {len(file_path)} video files to upload")
+    total_size = 0
+    for file in file_path:
+        try:
+            fileSize = os.path.getsize(file) / (1024 * 1024) # in MB
+            total_size += fileSize
+            print(f" - {os.path.basename(file)}: {fileSize:.1f} MB")
+        except OSError:
+            print(f"❌ Could not get file size for{file}")
+
+    print(f"Total size: {total_size:.1f} MB")
+    print(f"Destination: {self.bucket}{self.destination}")
+        
+
 
 def main():
+
+    parser = argparse.ArgumentParser(
+        description = "Upload video files to IBM COS using Aspera",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+        Examples: 
+        python main.py                              # Upload videos from current
+        directory
+        python main.py /path/to/other/video         # Upload from specific directory
+        python main.py --dry-run                    # Show what would be uploade (without really uploading)
+        '''
+    )
+
+    parser.add_argument(
+        'directory',
+        nargs='?',        # optional
+        default='.',      # default to current directory
+        help="Directory to scan for video files (default: current directory)"  
+    )
+
+    parser.add_argument(
+        '--dry-run',
+        action="store_true",
+        help='Show what would be uploaded without actually transferring'
+    )
+
+    parser.add_argument(
+        '--transfer-manager-host',
+        default='localhost:55002',
+        help='Transfer Manager daemon host:port'
+    )
+
+    args = parser.parse_args()
+
+    
     print("🔄 Starting Video Uploader ...")
     
     uploader = VideoUploader()
     
     video_files_finder_execute = find_video_files(uploader, directory=Path(__file__).parent)
+
     for file in video_files_finder_execute:
         print(" 📹 Found Video:", file)
+
+    if not video_files_finder_execute:
+        print("❌ Error: Directory is empty or corrupt")
+        sys.exit(1)
+    
+    if args.dry_run:
+        print("DRY RUN MODE - No files will be uploaded")
+        show_transfer_spec(uploader, video_files_finder_execute)
+
+    else: 
+        print("🚀 Starting transfer with IBM ASPERA...")
+        show_transfer_spec(uploader, video_files_finder_execute)
+    
     
     
              
