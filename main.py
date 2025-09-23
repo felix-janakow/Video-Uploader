@@ -18,7 +18,7 @@ Environment variables expected (see .env):
 - IBMCLOUD_BUCKET
 - IBMCLOUD_COS_INSTANCE_ID
 - IBMCLOUD_COS_ENDPOINT
-- Optional: ASPERA_REMOTE_HOST (default ats-sl-fra.aspera.io)
+- Optional: ASPERA_REMOTE_HOST (default ats-sl-fra.aspera.io --> Frankfurt)
 - Optional: COS_DESTINATION (default /aspera-uploads)
 
 CLI (short):
