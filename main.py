@@ -29,9 +29,10 @@ load_dotenv(dotenv_path=env_path)
 
 
 class VideoUploader:
-    def __init__(self, transfer_manager_host="localhost:55002"):
+    def __init__(self, transfer_manager_host="localhost:55002", create_dir=True):
         self.transfer_manager = transfer_manager_host
         self.client = None
+        self.create_dir = create_dir
 
         # Environment Variables
         self.api_key = os.environ.get("IBMCLOUD_API_KEY")
@@ -54,21 +55,35 @@ class VideoUploader:
             sys.exit(1)
         print("✅ Environment loaded successfully")
 
-    def _normalize_endpoint(self, endpoint: str) -> str:
-        if not endpoint:
-            return endpoint
-        if not (endpoint.startswith("http://") or endpoint.startswith("https://")):
-            return f"https://{endpoint}"
-        return endpoint
+    # removed normalization helpers per request; we'll inline minimal adjustments where needed
 
-    def find_video_files(self, directory):
-        directory = Path(directory)
+    def find_video_files(self, path_like):
+        p = Path(path_like)
         video_types = [".mp4", ".mov", ".MP4", ".MOV"]
+        if p.is_file():
+            # If a single file was provided, accept it directly
+            return [str(p.resolve())] if p.suffix in video_types else []
+        # Else, treat as directory and scan recursively
+        directory = p
         return [str(f.resolve()) for f in directory.rglob("*") if f.suffix in video_types and f.is_file()]
 
     def create_transfer_spec(self, file_paths):
         # Build a TransferSpecV2-compatible JSON dict per SDK examples
-        endpoint = self._normalize_endpoint(self.service_endpoint)
+        # Minimal inline endpoint fix: ensure https:// prefix if missing
+        endpoint = self.service_endpoint or ""
+        if endpoint and not (endpoint.startswith("http://") or endpoint.startswith("https://")):
+            endpoint = f"https://{endpoint}"
+
+        # Minimal inline destination fix: ensure it's treated as a directory/prefix
+        destination_root = (self.destination or "/").strip()
+        if not destination_root.startswith("/"):
+            destination_root = "/" + destination_root
+        if not destination_root.endswith("/"):
+            destination_root = destination_root + "/"
+
+        # Keep original filenames by default: only provide source paths
+        path_entries = [{"source": f} for f in file_paths]
+
         return {
             "session_initiation": {
                 "icos": {
@@ -78,12 +93,16 @@ class VideoUploader:
                     "ibm_service_endpoint": endpoint,
                 }
             },
+            # Ensure destination prefix is created if it doesn't exist
+            "file_system": {
+                "create_dir": bool(self.create_dir)
+            },
             "direction": "send",
             "remote_host": self.remote_host,
             "title": "video file upload",
             "assets": {
-                "destination_root": self.destination,
-                "paths": [{"source": f} for f in file_paths],
+                "destination_root": destination_root,
+                "paths": path_entries,
             },
         }
 
@@ -203,6 +222,10 @@ class VideoUploader:
 
         except Exception as e:
             print(f"❌ Transfer error: {e}")
+            msg = str(e)
+            if "Destination path is not a directory" in msg:
+                print("➡️ Hint: Set COS_DESTINATION to a directory prefix (e.g. '/', '/Upload/', or '/my-prefix/').")
+                print("    The destination must end with a trailing slash to be treated as a folder/prefix.")
             sys.exit(1)
 
 
@@ -213,9 +236,10 @@ def main():
     parser.add_argument('directory', nargs='?', default='.', help="Directory to scan")
     parser.add_argument('--dry-run', action="store_true", help="Show transfer spec without uploading")
     parser.add_argument('--transfer-manager-host', default='localhost:55002', help="Transfer Manager host:port")
+    parser.add_argument('--no-folder-marker', action='store_true', help="Do not create destination folder marker (sets file_system.create_dir=false)")
     args = parser.parse_args()
 
-    uploader = VideoUploader(transfer_manager_host=args.transfer_manager_host)
+    uploader = VideoUploader(transfer_manager_host=args.transfer_manager_host, create_dir=not args.no_folder_marker)
     videos = uploader.find_video_files(args.directory)
 
     if not videos:
