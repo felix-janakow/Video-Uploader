@@ -248,12 +248,16 @@ class VideoUploader:
             return
 
         print(f"📹 Found {len(abs_files)} video(s) to upload:")
+        total_size = 0
         for f in abs_files:
             try:
                 size_mb = os.path.getsize(f) / (1024 * 1024)
                 print(f"  - {f} ({size_mb:.1f} MB)")
+                total_size += size_mb
             except OSError:
                 print(f"  - {f}")
+        
+        print(f"Total size: {total_size:.1f} MB")
 
         transfer_spec = self.create_transfer_spec(abs_files)
 
@@ -302,7 +306,7 @@ class VideoUploader:
                     progress_bytes = 0
                 progress_mb = progress_bytes / (1024 * 1024)
                 elapsed = int(time.time() - start_time)
-                print(f"[{elapsed}s] Transfer {t_id}: {self.get_status_text(status_code)} - {progress_mb:.1f} MB")
+                print(f"[{elapsed}s] Transfer {t_id}: {self.get_status_text(status_code)} - {progress_mb:.1f} MB of {total_size:.1f} MB")
 
                 if status_code in (transfer_manager.COMPLETED, transfer_manager.FAILED):
                     # Terminal states: break the monitor loop
