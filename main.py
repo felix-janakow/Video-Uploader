@@ -1,189 +1,232 @@
-import argparse             # For command line arguments
-import json     
+from dotenv import load_dotenv
+import argparse
 import os
-import glob
 import sys
-from pathlib import Path    # Better file path handling
-import grpc                 # For talking to transfer manager
+from pathlib import Path
+import json
+import grpc
+import time
 
-sdk_path = Path(__file__).parent / "ibm-aspera-transfer-sdk-macos-arm64-1.1.6"/"api"/"python"/"transferd_api"
-sys.path.insert(0, str(sdk_path))
+# Ensure SDK Python path is available BEFORE importing stubs
+SDK_PY_PATH = Path(__file__).parent / "ibm-aspera-transfer-sdk-macos-arm64-1.1.6" / "api" / "python"
+if str(SDK_PY_PATH) not in sys.path:
+    sys.path.insert(0, str(SDK_PY_PATH))
 
-try: 
+# gRPC stubs from the SDK (per the official examples)
+try:
     import transferd_api.transferd_pb2 as transfer_manager
     import transferd_api.transferd_pb2_grpc as transfer_manager_grpc
-    #print("✅ Import successfull")
+    from transferd_api.transferd_pb2 import TransferRequest, TransferConfig, RegistrationRequest, RegistrationFilter
+    
+except ImportError as e:
+    print("Could not import Aspera SDK Python stubs. Make sure the SDK path is correct and gRPC is installed.")
+    print(f"Import error: {e}")
+    sys.exit(1)
 
-except ImportError:
-    print("Protobuf installation needed to run this code")
-    #sys.exit(2)
+# .env laden
+env_path = Path(__file__).parent / ".env"
+load_dotenv(dotenv_path=env_path)
+
 
 class VideoUploader:
-    def __init__ (self, transfer_manager_host="localhost:55002"):
-    
+    def __init__(self, transfer_manager_host="localhost:55002"):
         self.transfer_manager = transfer_manager_host
         self.client = None
 
+        # Environment Variables
         self.api_key = os.environ.get("IBMCLOUD_API_KEY")
         self.bucket = os.environ.get("IBMCLOUD_BUCKET")
         self.service_instance_id = os.environ.get("IBMCLOUD_COS_INSTANCE_ID")
         self.service_endpoint = os.environ.get("IBMCLOUD_COS_ENDPOINT")
-
-        self.remote_host = os.environ.get("ASPERA_REMOTE_HOST", "https://ats-sl-fra.aspera.io:443")
+        self.remote_host = os.environ.get("ASPERA_REMOTE_HOST", "ats-sl-fra.aspera.io")
         self.destination = os.environ.get("COS_DESTINATION", "/aspera-uploads")
-        self._validatate_environment()
 
-    def _validatate_environment(self):
+    def _validate_environment(self):
         required_vars = [
-            ("IBMCLOUD_API_KEY", self.api_key), 
-            ("IBMCLOUD_BUCKET", self.bucket), 
+            ("IBMCLOUD_API_KEY", self.api_key),
+            ("IBMCLOUD_BUCKET", self.bucket),
             ("IBMCLOUD_COS_INSTANCE_ID", self.service_instance_id),
             ("IBMCLOUD_COS_ENDPOINT", self.service_endpoint),
         ]
-        missing_vars = [name for name, val in required_vars if val is None]
-        if missing_vars:
-            print("Missing required environment variables:")
-            for var in missing_vars:
-                print(f"Set {var} before running again")
-        else: 
-            print("✅ Confiuration loaded successfully")
+        missing = [name for name, val in required_vars if not val]
+        if missing:
+            print("Missing environment variables:", missing)
+            sys.exit(1)
+        print("✅ Environment loaded successfully")
 
-def find_video_files(self, directory):
-    video_types = [".mp4", ".mov", ".MP4", ".MOV"]
-    video_files = []
+    def _normalize_endpoint(self, endpoint: str) -> str:
+        if not endpoint:
+            return endpoint
+        if not (endpoint.startswith("http://") or endpoint.startswith("https://")):
+            return f"https://{endpoint}"
+        return endpoint
 
-    directory = Path(directory)
-    print("Looking for video files in", directory)
+    def find_video_files(self, directory):
+        directory = Path(directory)
+        video_types = [".mp4", ".mov", ".MP4", ".MOV"]
+        return [str(f.resolve()) for f in directory.rglob("*") if f.suffix in video_types and f.is_file()]
 
-    for video in directory.rglob("*"):
-        if video.suffix in video_types and video.is_file():
-            video_files.append(str(video))
-        
-    return video_files
+    def create_transfer_spec(self, file_paths):
+        # Build a TransferSpecV2-compatible JSON dict per SDK examples
+        endpoint = self._normalize_endpoint(self.service_endpoint)
+        return {
+            "session_initiation": {
+                "icos": {
+                    "api_key": self.api_key,
+                    "bucket": self.bucket,
+                    "ibm_service_instance_id": self.service_instance_id,
+                    "ibm_service_endpoint": endpoint,
+                }
+            },
+            "direction": "send",
+            "remote_host": self.remote_host,
+            "title": "video file upload",
+            "assets": {
+                "destination_root": self.destination,
+                "paths": [{"source": f} for f in file_paths],
+            },
+        }
 
-def create_transfer_spec(self, filepaths):
-    paths = []
+    def show_transfer_spec(self, file_paths):
+        spec = self.create_transfer_spec(file_paths)
+        print("ℹ️ Transfer specification:")
+        print(json.dumps(spec, indent=2))
 
-    for filepath in filepaths:
-        paths.append({"source": filepath})
+    def connect(self):
+        if not self.client:
+            try:
+                self.client = transfer_manager_grpc.TransferServiceStub(
+                    grpc.insecure_channel(self.transfer_manager)
+                )
+                print("✅ Connected to Transfer Manager")
+            except Exception as e:
+                print(f"❌ Could not connect: {e}")
+                sys.exit(1)
 
-    trasfer_spec = {
-        "session_initialization": {
-            "icons": {
-                "api_key": self.api_key,
-                "bucket": self.bucket,
-                "ibm_service_instance_id": self.service_instance_id,
-                "ibm_service_endpoint": self.service_endpoint
-            }
-        },
+    def get_status_text(self, status_code):
+        status_map = {
+            transfer_manager.QUEUED: "Queued",
+            transfer_manager.RUNNING: "Running",
+            transfer_manager.COMPLETED: "Completed",
+            transfer_manager.FAILED: "Failed",
+            transfer_manager.PAUSED: "Paused"
+        }
+        return status_map.get(status_code, f"Unknown ({status_code})")
 
-        "direction": "send",
-        "remote_host": self.remote_host,
-        "title": "video file upload",
+    def upload_videos(self, file_paths, dry_run=False):
+        if not file_paths:
+            print("❌ No video files found")
+            return
 
-        "assets": {
-            "destination_root": self.destination,
-            "paths": paths,
-        },
-    }
+        # Normalize to absolute paths and validate
+        abs_files = []
+        for f in file_paths:
+            p = Path(f).resolve()
+            if not p.exists():
+                print(f"❌ Source not found: {p}")
+                continue
+            if not p.is_file():
+                print(f"❌ Not a file: {p}")
+                continue
+            if not os.access(p, os.R_OK):
+                print(f"❌ Not readable: {p}")
+                continue
+            abs_files.append(str(p))
 
-    
-    return json.dumps(trasfer_spec, indent=2)
+        if not abs_files:
+            print("❌ No valid, readable source files to upload")
+            return
 
+        print(f"📹 Found {len(abs_files)} video(s) to upload:")
+        for f in abs_files:
+            try:
+                size_mb = os.path.getsize(f) / (1024 * 1024)
+                print(f"  - {f} ({size_mb:.1f} MB)")
+            except OSError:
+                print(f"  - {f}")
 
-def show_transfer_spec(self, filepaths):
-    spec = create_transfer_spec(self, filepaths)
-    print("ℹ️ Transfer specification created: ")
-    print(spec)
+        transfer_spec = self.create_transfer_spec(abs_files)
 
-def  connect(self):
-    try:
-        self.client = transfer_manager_grpc.TransferServiceStub(grpc.insecure_channel(self.transfer_manager))
-        print("✅ Connected to transfer manager")
-    except Exception as e:
-        print(f"❌ Could not connect to transfer manager: {e}")
-        sys.exit(1)
+        if dry_run:
+            print("\n--- DRY RUN ---")
+            print(json.dumps(transfer_spec, indent=2))
+            return
 
+        self.connect()
 
-def upload_videos(self, file_path, dry_run=False):
-    print(f"Total of {len(file_path)} video files to upload")
-    total_size = 0
-    for file in file_path:
+        # Validate environment only for actual transfers
+        self._validate_environment()
+
+        transfer_request = TransferRequest(
+            transferType=transfer_manager.FILE_REGULAR,
+            config=TransferConfig(),
+            transferSpec=json.dumps(transfer_spec),
+        )
+
         try:
-            fileSize = os.path.getsize(file) / (1024 * 1024) # in MB
-            total_size += fileSize
-            print(f" - {os.path.basename(file)}: {fileSize:.1f} MB")
-        except OSError:
-            print(f"❌ Could not get file size for{file}")
+            print("\n🚀 Starting transfer...")
+            response = self.client.StartTransfer(transfer_request)
+            transfer_id = response.transferId
+            print(f"✅ Transfer started with ID: {transfer_id}")
 
-    print(f"Total size: {total_size:.1f} MB")
-    print(f"Destination: {self.bucket}{self.destination}")
-        
+            # Monitor Transfer
+            registration_request = RegistrationRequest()
+            registration_filter = RegistrationFilter()
+            registration_filter.transferId.append(transfer_id)
+            registration_request.filters.append(registration_filter)
+
+            start_time = time.time()
+            timeout_seconds = 300
+
+            for info in self.client.MonitorTransfers(registration_request):
+                t_id = getattr(info, "transferId", "unknown")
+                status_code = getattr(info, "status", -1)
+                # TransferResponse carries an embedded TransferInfo with bytesTransferred
+                try:
+                    progress_bytes = info.transferInfo.bytesTransferred if info.HasField("transferInfo") else 0
+                except Exception:
+                    progress_bytes = 0
+                progress_mb = progress_bytes / (1024 * 1024)
+                elapsed = int(time.time() - start_time)
+                print(f"[{elapsed}s] Transfer {t_id}: {self.get_status_text(status_code)} - {progress_mb:.1f} MB")
+
+                if status_code in (transfer_manager.COMPLETED, transfer_manager.FAILED):
+                    if status_code == transfer_manager.COMPLETED:
+                        print("✅ Transfer completed successfully!")
+                    else:
+                        print("❌ Transfer failed!")
+                    break
+
+                if elapsed > timeout_seconds:
+                    print(f"⏰ Timeout ({timeout_seconds}s). Transfer may still be running.")
+                    break
+
+        except Exception as e:
+            print(f"❌ Transfer error: {e}")
+            sys.exit(1)
 
 
 def main():
-
     parser = argparse.ArgumentParser(
-        description = "Upload video files to IBM COS using Aspera",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog='''
-        Examples: 
-        python main.py                              # Upload videos from current
-        directory
-        python main.py /path/to/other/video         # Upload from specific directory
-        python main.py --dry-run                    # Show what would be uploade (without really uploading)
-        '''
+        description="Upload video files to IBM COS using Aspera"
     )
-
-    parser.add_argument(
-        'directory',
-        nargs='?',        # optional
-        default='.',      # default to current directory
-        help="Directory to scan for video files (default: current directory)"  
-    )
-
-    parser.add_argument(
-        '--dry-run',
-        action="store_true",
-        help='Show what would be uploaded without actually transferring'
-    )
-
-    parser.add_argument(
-        '--transfer-manager-host',
-        default='localhost:55002',
-        help='Transfer Manager daemon host:port'
-    )
-
+    parser.add_argument('directory', nargs='?', default='.', help="Directory to scan")
+    parser.add_argument('--dry-run', action="store_true", help="Show transfer spec without uploading")
+    parser.add_argument('--transfer-manager-host', default='localhost:55002', help="Transfer Manager host:port")
     args = parser.parse_args()
 
-    
-    print("🔄 Starting Video Uploader ...")
-    
-    uploader = VideoUploader()
-    
-    video_files_finder_execute = find_video_files(uploader, directory=Path(__file__).parent)
+    uploader = VideoUploader(transfer_manager_host=args.transfer_manager_host)
+    videos = uploader.find_video_files(args.directory)
 
-    for file in video_files_finder_execute:
-        print(" 📹 Found Video:", file)
-
-    if not video_files_finder_execute:
-        print("❌ Error: Directory is empty or corrupt")
+    if not videos:
+        print("❌ No videos found")
         sys.exit(1)
-    
-    if args.dry_run:
-        print("DRY RUN MODE - No files will be uploaded")
-        show_transfer_spec(uploader, video_files_finder_execute)
 
-    else: 
-        print("🚀 Starting transfer with IBM ASPERA...")
-        show_transfer_spec(uploader, video_files_finder_execute)
-    
-    
-    
-             
+    uploader.upload_videos(videos, dry_run=args.dry_run)
+
+    if args.dry_run:
+        print("ℹ️ Dry run complete")
+
+
 if __name__ == "__main__":
     main()
-
-        
-
-        
